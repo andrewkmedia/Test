@@ -1,0 +1,82 @@
+name: Build Flutter AAB
+
+on:
+  repository_dispatch:
+    types: [build_aab]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.16.0'
+          channel: 'stable'
+          
+      - name: Get Flutter dependencies
+        run: flutter pub get
+        
+      - name: Verify Flutter installation
+        run: flutter doctor
+        
+      - name: Extract project files
+        run: |
+          cd jobs/${{ github.event.client_payload.task_id }}
+          unzip -q project.zip -d flutter_project
+          cd flutter_project
+          
+      - name: Setup keystore
+        run: |
+          cd jobs/${{ github.event.client_payload.task_id }}
+          cp keystore.jks flutter_project/android/app/
+          cp icon.png flutter_project/android/app/src/main/res/mipmap-hdpi/
+          cp icon.png flutter_project/android/app/src/main/res/mipmap-mdpi/
+          cp icon.png flutter_project/android/app/src/main/res/mipmap-xhdpi/
+          cp icon.png flutter_project/android/app/src/main/res/mipmap-xxhdpi/
+          cp icon.png flutter_project/android/app/src/main/res/mipmap-xxxhdpi/
+          
+      - name: Update app metadata
+        run: |
+          cd jobs/${{ github.event.client_payload.task_id }}/flutter_project
+          
+          # Update pubspec.yaml
+          sed -i "s/name: .*/name: ${{ github.event.client_payload.metadata.app_name }}/" pubspec.yaml
+          sed -i "s/version: .*/version: ${{ github.event.client_payload.metadata.version_name }}+${{ github.event.client_payload.metadata.version_code }}/" pubspec.yaml
+          
+          # Update Android manifest
+          sed -i "s/package=\"[^\"]*\"/package=\"${{ github.event.client_payload.metadata.bundle_id }}\"/" android/app/src/main/AndroidManifest.xml
+          
+      - name: Build AAB
+        run: |
+          cd jobs/${{ github.event.client_payload.task_id }}/flutter_project
+          flutter build appbundle \
+            --release \
+            --build-name=${{ github.event.client_payload.metadata.version_name }} \
+            --build-number=${{ github.event.client_payload.metadata.version_code }} \
+            --dart-define=STORE_PASSWORD=${{ github.event.client_payload.metadata.storePassword }} \
+            --dart-define=KEY_PASSWORD=${{ github.event.client_payload.metadata.keyPassword }} \
+            --dart-define=KEY_ALIAS=${{ github.event.client_payload.metadata.keyAlias }}
+            
+      - name: Upload AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ github.event.client_payload.task_id }}
+          path: jobs/${{ github.event.client_payload.task_id }}/flutter_project/build/app/outputs/bundle/release/app-release.aab
+          retention-days: 7
+          
+      - name: Cleanup
+        run: |
+          rm -rf jobs/${{ github.event.client_payload.task_id }}
