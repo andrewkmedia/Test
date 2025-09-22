@@ -1,0 +1,163 @@
+name: Build Flutter AAB
+
+on:
+  repository_dispatch:
+    types: [build_aab]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.16.0'
+        channel: 'stable'
+        
+    - name: Get task ID
+      id: task_id
+      run: echo "task_id=${{ github.event.client_payload.task_id }}" >> $GITHUB_OUTPUT
+      
+    - name: Download project files
+      run: |
+        echo "Task ID: ${{ steps.task_id.outputs.task_id }}"
+        ls -la jobs/${{ steps.task_id.outputs.task_id }}/
+        
+    - name: Extract Flutter project
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/
+        unzip -q project.zip -d flutter_project/
+        ls -la flutter_project/
+        
+    - name: Read metadata
+      id: metadata
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/
+        echo "metadata=$(cat metadata.json)" >> $GITHUB_OUTPUT
+        
+    - name: Setup Android keystore
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/
+        mkdir -p ~/.android
+        cp keystore.jks ~/.android/
+        echo "keystore_file=~/.android/keystore.jks" >> $GITHUB_ENV
+        
+    - name: Configure Flutter project
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/flutter_project/
+        
+        # Update pubspec.yaml with metadata
+        python3 -c "
+        import json
+        import yaml
+        
+        with open('../metadata.json', 'r') as f:
+            metadata = json.load(f)
+        
+        with open('pubspec.yaml', 'r') as f:
+            pubspec = yaml.safe_load(f)
+        
+        pubspec['name'] = metadata['bundle_id'].split('.')[-1]
+        pubspec['version'] = f\"{metadata['version_name']}+{metadata['version_code']}\"
+        
+        with open('pubspec.yaml', 'w') as f:
+            yaml.dump(pubspec, f, default_flow_style=False)
+        "
+        
+    - name: Replace app icon
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/flutter_project/
+        
+        # Find and replace app icon
+        find . -name "*.png" -path "*/android/app/src/main/res/*" | head -1 | xargs -I {} cp ../icon.png {}
+        
+    - name: Configure Android signing
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/flutter_project/
+        
+        # Create key.properties
+        python3 -c "
+        import json
+        
+        with open('../metadata.json', 'r') as f:
+            metadata = json.load(f)
+        
+        key_properties = f\"\"\"
+        storePassword={metadata['keystore_passwords']['storePassword']}
+        keyPassword={metadata['keystore_passwords']['keyPassword']}
+        keyAlias={metadata['keystore_passwords']['keyAlias']}
+        storeFile=/home/runner/.android/keystore.jks
+        \"\"\"
+        
+        with open('android/key.properties', 'w') as f:
+            f.write(key_properties)
+        "
+        
+    - name: Update Android build.gradle
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/flutter_project/
+        
+        # Update android/app/build.gradle for signing
+        python3 -c "
+        import re
+        
+        with open('android/app/build.gradle', 'r') as f:
+            content = f.read()
+        
+        # Add signing config
+        signing_config = '''
+        def keystoreProperties = new Properties()
+        def keystorePropertiesFile = rootProject.file('key.properties')
+        if (keystorePropertiesFile.exists()) {
+            keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+        }
+        
+        android {
+            signingConfigs {
+                release {
+                    keyAlias keystoreProperties['keyAlias']
+                    keyPassword keystoreProperties['keyPassword']
+                    storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+                    storePassword keystoreProperties['storePassword']
+                }
+            }
+            buildTypes {
+                release {
+                    signingConfig signingConfigs.release
+                }
+            }
+        }
+        '''
+        
+        # Insert before android block
+        content = re.sub(r'(android\s*\{)', signing_config + r'\1', content)
+        
+        with open('android/app/build.gradle', 'w') as f:
+            f.write(content)
+        "
+        
+    - name: Get Flutter dependencies
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/flutter_project/
+        flutter pub get
+        
+    - name: Build AAB
+      run: |
+        cd jobs/${{ steps.task_id.outputs.task_id }}/flutter_project/
+        flutter build appbundle --release
+        
+    - name: Upload AAB artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-release-${{ steps.task_id.outputs.task_id }}
+        path: jobs/${{ steps.task_id.outputs.task_id }}/flutter_project/build/app/outputs/bundle/release/app-release.aab
+        retention-days: 30
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -rf jobs/${{ steps.task_id.outputs.task_id }}/
